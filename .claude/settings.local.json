@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash",
+      "WebFetch",
+      "Update",
+      "Read file",
+      "Read files",
+      "Update"
+    ],
+    "deny": []
+  }
+}

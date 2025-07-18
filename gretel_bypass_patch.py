@@ -195,11 +195,28 @@ def patch_data_designer():
                 for column_name in sorted_columns:
                     column = self.get_column(column_name)
 
-                    if hasattr(column, "params") and hasattr(column.params, "values"):
-                        # Sampler column - pick random value
+                    if hasattr(column, "params"):
+                        # Handle different sampler types
                         import random
-
-                        record[column_name] = random.choice(column.params.values)
+                        
+                        if hasattr(column.params, "values"):
+                            if isinstance(column.params.values, list):
+                                # Category sampler - simple list of values
+                                record[column_name] = random.choice(column.params.values)
+                            elif isinstance(column.params.values, dict):
+                                # Subcategory sampler - depends on category column
+                                category_name = getattr(column.params, "category", None)
+                                if category_name and category_name in record:
+                                    category_value = record[category_name]
+                                    subcategories = column.params.values.get(category_value, [])
+                                    if subcategories:
+                                        record[column_name] = random.choice(subcategories)
+                                    else:
+                                        record[column_name] = f"[No subcategories for {category_value}]"
+                                else:
+                                    record[column_name] = f"[Missing category dependency: {category_name}]"
+                            else:
+                                record[column_name] = str(column.params.values)
 
                     elif isinstance(column, (LLMTextColumn, LLMGenColumn)):
                         # LLM column - execute locally
@@ -269,17 +286,33 @@ def patch_data_designer():
 
     def _get_sorted_columns(self) -> List[str]:
         """Get columns sorted by dependencies."""
-        # Simple approach - put sampler columns first, then LLM columns
-        sampler_columns = []
+        # Separate column types and handle dependencies
+        category_columns = []
+        subcategory_columns = []
         llm_columns = []
+        other_columns = []
 
         for column_name, column in self._columns.items():
-            if hasattr(column, "params") and hasattr(column.params, "values"):
-                sampler_columns.append(column_name)
-            else:
+            if hasattr(column, "params"):
+                if hasattr(column.params, "values"):
+                    if isinstance(column.params.values, list):
+                        # Category sampler - no dependencies
+                        category_columns.append(column_name)
+                    elif isinstance(column.params.values, dict):
+                        # Subcategory sampler - depends on category
+                        subcategory_columns.append(column_name)
+                    else:
+                        other_columns.append(column_name)
+                else:
+                    other_columns.append(column_name)
+            elif hasattr(column, "model_alias"):
+                # LLM columns - should come after samplers
                 llm_columns.append(column_name)
+            else:
+                other_columns.append(column_name)
 
-        return sampler_columns + llm_columns
+        # Return in dependency order: categories first, then subcategories, then LLM, then others
+        return category_columns + subcategory_columns + llm_columns + other_columns
 
     def _get_model_config_for_column(self, column) -> Optional[ModelConfig]:
         """Get the model config for a specific column."""
