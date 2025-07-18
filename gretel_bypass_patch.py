@@ -21,8 +21,16 @@ logger = logging.getLogger(__name__)
 class LocalLLMExecutor:
     """Handles local execution of LLM tasks for custom model connections."""
 
-    def __init__(self, connection_configs: Dict[str, Dict[str, Any]]):
+    def __init__(self, connection_configs: Dict[str, Dict[str, Any]], debug_storage: bool = False, debug_file: Optional[str] = None):
         self.connection_configs = connection_configs
+        self.debug_storage = debug_storage
+        self.debug_file = debug_file
+        self.debug_calls = [] if debug_storage else None
+        self.debug_call_count = 0
+        
+        # Initialize debug file if streaming is enabled
+        if debug_storage and debug_file:
+            self._initialize_debug_file()
 
     def execute_llm_column(
         self, column, context_data: Dict[str, Any], model_config: ModelConfig
@@ -121,6 +129,19 @@ class LocalLLMExecutor:
         logger.info(f"🔄 Making local LLM call to {url}")
         logger.debug(f"Payload: {json.dumps(payload, indent=2)}")
 
+        # Store debug information if enabled
+        debug_info = None
+        if self.debug_storage:
+            debug_info = {
+                "timestamp": pd.Timestamp.now().isoformat(),
+                "url": url,
+                "payload": payload.copy(),
+                "headers": {k: v for k, v in headers.items() if k != "Authorization"},
+                "model_name": model_name,
+                "system_prompt": system_prompt,
+                "user_prompt": prompt,
+            }
+
         try:
             response = requests.post(url, json=payload, headers=headers, timeout=30)
             response.raise_for_status()
@@ -134,11 +155,113 @@ class LocalLLMExecutor:
                 raise ValueError("Empty response from local LLM")
 
             logger.info(f"✅ Local LLM response: {content[:100]}...")
+            
+            # Store debug information if enabled
+            if self.debug_storage and debug_info:
+                debug_info.update({
+                    "success": True,
+                    "response": result,
+                    "response_content": content,
+                    "response_length": len(content),
+                })
+                
+                # Append to memory if not streaming to file
+                if self.debug_calls is not None:
+                    self.debug_calls.append(debug_info)
+                
+                # Append to file in real-time if streaming enabled
+                if self.debug_file:
+                    self._append_debug_call(debug_info)
+            
             return content
 
         except requests.exceptions.RequestException as e:
             logger.error(f"❌ Local LLM call failed: {e}")
+            
+            # Store debug information if enabled
+            if self.debug_storage and debug_info:
+                debug_info.update({
+                    "success": False,
+                    "error": str(e),
+                    "error_type": type(e).__name__,
+                })
+                
+                # Append to memory if not streaming to file
+                if self.debug_calls is not None:
+                    self.debug_calls.append(debug_info)
+                
+                # Append to file in real-time if streaming enabled
+                if self.debug_file:
+                    self._append_debug_call(debug_info)
+            
             raise
+
+    def _initialize_debug_file(self):
+        """Initialize the debug file with an empty JSON array."""
+        try:
+            with open(self.debug_file, "w") as f:
+                f.write("[\n")
+            logger.info(f"🔧 Initialized debug file: {self.debug_file}")
+        except Exception as e:
+            logger.error(f"❌ Failed to initialize debug file {self.debug_file}: {e}")
+
+    def _append_debug_call(self, debug_info: Dict[str, Any]):
+        """Append a single debug call to the file in real-time."""
+        if not self.debug_file:
+            return
+            
+        try:
+            # Add comma if not the first entry
+            prefix = ",\n" if self.debug_call_count > 0 else ""
+            
+            with open(self.debug_file, "a") as f:
+                f.write(f"{prefix}  {json.dumps(debug_info, indent=2, default=str)}")
+                f.flush()  # Ensure immediate write
+                
+            self.debug_call_count += 1
+            logger.debug(f"📝 Appended debug call #{self.debug_call_count} to {self.debug_file}")
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to append debug call to {self.debug_file}: {e}")
+
+    def _finalize_debug_file(self):
+        """Close the JSON array in the debug file."""
+        if not self.debug_file:
+            return
+            
+        try:
+            with open(self.debug_file, "a") as f:
+                f.write("\n]")
+            logger.info(f"✅ Finalized debug file: {self.debug_file} ({self.debug_call_count} calls)")
+        except Exception as e:
+            logger.error(f"❌ Failed to finalize debug file {self.debug_file}: {e}")
+
+    def save_debug_calls(self, filename: str = "llm_debug_calls.json"):
+        """Save debug calls to a JSON file."""
+        if not self.debug_storage or not self.debug_calls:
+            logger.warning("No debug calls to save (debug_storage disabled or no calls made)")
+            return
+        
+        with open(filename, "w") as f:
+            json.dump(self.debug_calls, f, indent=2, default=str)
+        
+        logger.info(f"💾 Saved {len(self.debug_calls)} debug calls to {filename}")
+
+    def get_debug_summary(self) -> Dict[str, Any]:
+        """Get a summary of debug calls."""
+        if not self.debug_storage or not self.debug_calls:
+            return {"total_calls": 0, "successful_calls": 0, "failed_calls": 0}
+        
+        successful = sum(1 for call in self.debug_calls if call.get("success", False))
+        failed = len(self.debug_calls) - successful
+        
+        return {
+            "total_calls": len(self.debug_calls),
+            "successful_calls": successful,
+            "failed_calls": failed,
+            "average_response_length": sum(call.get("response_length", 0) for call in self.debug_calls if call.get("success", False)) / max(successful, 1),
+            "calls": self.debug_calls,
+        }
 
 
 def patch_data_designer():
@@ -173,13 +296,16 @@ def patch_data_designer():
 
         return connection_configs
 
-    def _execute_local_preview(self, verbose_logging: bool = False) -> PreviewResults:
+    def _execute_local_preview(self, verbose_logging: bool = False, debug_storage: bool = False, debug_file: Optional[str] = None) -> PreviewResults:
         """Execute preview locally without going through Gretel servers."""
         logger.info("🚀 Executing local preview (bypassing Gretel servers)")
 
         # Get connection configurations
         connection_configs = self._get_connection_configs()
-        executor = LocalLLMExecutor(connection_configs)
+        executor = LocalLLMExecutor(connection_configs, debug_storage=debug_storage, debug_file=debug_file)
+        
+        # Store executor for later access to debug info
+        self._last_executor = executor
 
         # Generate sample data
         num_records = 10  # Preview records
@@ -265,6 +391,16 @@ def patch_data_designer():
             )
 
             logger.info("🎉 Local preview completed successfully!")
+            
+            # Finalize debug file if streaming
+            if debug_file and executor.debug_file:
+                executor._finalize_debug_file()
+            
+            # Add debug info to results if enabled
+            if debug_storage and executor.debug_storage:
+                preview_results.debug_info = executor.get_debug_summary()
+                logger.info(f"🔍 Debug info: {preview_results.debug_info['total_calls']} LLM calls captured")
+            
             return preview_results
 
         except Exception as e:
@@ -277,12 +413,23 @@ def patch_data_designer():
                 columns=[], num_records=0, project_id="local-preview-error"
             )
 
-            return PreviewResults(
+            error_results = PreviewResults(
                 aidd_metadata=aidd_metadata,
                 output=None,
                 success=False,
                 evaluation_results={"error": f"Local execution failed: {str(e)}"},
             )
+            
+            # Finalize debug file if streaming (even on error)
+            if debug_file and executor.debug_file:
+                executor._finalize_debug_file()
+            
+            # Add debug info to error results if enabled
+            if debug_storage and executor.debug_storage:
+                error_results.debug_info = executor.get_debug_summary()
+                logger.info(f"🔍 Debug info: {error_results.debug_info['total_calls']} LLM calls captured (with errors)")
+            
+            return error_results
 
     def _get_sorted_columns(self) -> List[str]:
         """Get columns sorted by dependencies."""
@@ -325,8 +472,22 @@ def patch_data_designer():
 
         return None
 
+    def save_debug_info(self, filename: str = "llm_debug_calls.json"):
+        """Save debug information from the last preview call."""
+        if hasattr(self, '_last_executor') and self._last_executor and self._last_executor.debug_storage:
+            self._last_executor.save_debug_calls(filename)
+        else:
+            logger.warning("No debug information available (debug_storage was not enabled or no preview was run)")
+
+    def get_debug_summary(self) -> Dict[str, Any]:
+        """Get debug summary from the last preview call."""
+        if hasattr(self, '_last_executor') and self._last_executor and self._last_executor.debug_storage:
+            return self._last_executor.get_debug_summary()
+        else:
+            return {"total_calls": 0, "successful_calls": 0, "failed_calls": 0}
+
     def patched_preview(
-        self, verbose_logging: bool = False, validate: bool = True
+        self, verbose_logging: bool = False, validate: bool = True, debug_storage: bool = False, debug_file: Optional[str] = None
     ) -> PreviewResults:
         """Patched preview method that bypasses Gretel servers for custom connections."""
         if validate:
@@ -335,7 +496,7 @@ def patch_data_designer():
         # Check if this configuration uses custom model connections
         if self._has_custom_connections():
             logger.info("🔄 Detected custom model connections - executing locally")
-            return self._execute_local_preview(verbose_logging=verbose_logging)
+            return self._execute_local_preview(verbose_logging=verbose_logging, debug_storage=debug_storage, debug_file=debug_file)
         else:
             # Use original implementation for non-custom connections
             logger.info("🚀 Generating preview (using Gretel servers)")
@@ -352,6 +513,8 @@ def patch_data_designer():
     DataDesigner._execute_local_preview = _execute_local_preview
     DataDesigner._get_sorted_columns = _get_sorted_columns
     DataDesigner._get_model_config_for_column = _get_model_config_for_column
+    DataDesigner.save_debug_info = save_debug_info
+    DataDesigner.get_debug_summary = get_debug_summary
     DataDesigner.preview = patched_preview
 
     logger.info("✅ DataDesigner bypass patch applied successfully!")
