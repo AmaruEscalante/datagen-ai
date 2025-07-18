@@ -67,17 +67,47 @@ class LocalLLMExecutor:
     def _substitute_template_variables(
         self, prompt: str, context_data: Dict[str, Any]
     ) -> str:
-        """Substitute template variables in the prompt with actual values."""
-        import re
+        """Substitute template variables in the prompt with actual values using Jinja2."""
+        try:
+            from jinja2 import Template
+            
+            # Debug: Log what we're working with
+            logger.debug(f"Template substitution input:")
+            logger.debug(f"  Prompt: {prompt[:200]}...")
+            logger.debug(f"  Context data: {context_data}")
+            logger.debug(f"  Context data keys: {list(context_data.keys())}")
+            
+            # Create Jinja2 template
+            template = Template(prompt)
+            
+            # Render template with context data
+            rendered = template.render(context_data)
+            
+            logger.debug(f"Template rendered: {rendered[:200]}...")
+            
+            # Check if substitution actually worked
+            if "{{" in rendered:
+                logger.warning(f"Template variables not substituted! Rendered: {rendered[:300]}...")
+            
+            return rendered
+            
+        except ImportError:
+            # Fallback to simple regex replacement if Jinja2 is not available
+            logger.warning("Jinja2 not available, using simple template variable replacement")
+            import re
 
-        # Find all template variables like {{variable_name}}
-        template_vars = re.findall(r"\{\{(\w+)\}\}", prompt)
+            # Find all template variables like {{variable_name}}
+            template_vars = re.findall(r"\{\{(\w+)\}\}", prompt)
 
-        for var in template_vars:
-            if var in context_data:
-                prompt = prompt.replace(f"{{{{{var}}}}}", str(context_data[var]))
+            for var in template_vars:
+                if var in context_data:
+                    prompt = prompt.replace(f"{{{{{var}}}}}", str(context_data[var]))
 
-        return prompt
+            return prompt
+        except Exception as e:
+            logger.error(f"Template rendering failed: {e}")
+            # Return original prompt if rendering fails
+            return prompt
 
     def _call_local_llm(
         self,
@@ -320,32 +350,73 @@ def patch_data_designer():
 
                 for column_name in sorted_columns:
                     column = self.get_column(column_name)
+                    
+                    logger.debug(f"Processing column {column_name}: {type(column).__name__}")
 
                     if hasattr(column, "params"):
                         # Handle different sampler types
                         import random
+                        import numpy as np
                         
                         if hasattr(column.params, "values"):
                             if isinstance(column.params.values, list):
-                                # Category sampler - simple list of values
-                                record[column_name] = random.choice(column.params.values)
+                                # Category sampler - handle weighted sampling
+                                values = column.params.values
+                                weights = getattr(column.params, "weights", None)
+                                
+                                if weights and len(weights) == len(values):
+                                    # Weighted sampling
+                                    try:
+                                        # Normalize weights
+                                        weights = np.array(weights, dtype=float)
+                                        weights = weights / weights.sum()
+                                        
+                                        # Sample based on weights
+                                        selected_value = np.random.choice(values, p=weights)
+                                        record[column_name] = selected_value
+                                        logger.debug(f"  Weighted sampled {column_name}: {selected_value}")
+                                    except Exception as e:
+                                        logger.warning(f"Weighted sampling failed for {column_name}: {e}, using uniform sampling")
+                                        selected_value = random.choice(values)
+                                        record[column_name] = selected_value
+                                        logger.debug(f"  Fallback sampled {column_name}: {selected_value}")
+                                else:
+                                    # Uniform sampling
+                                    selected_value = random.choice(values)
+                                    record[column_name] = selected_value
+                                    logger.debug(f"  Uniform sampled {column_name}: {selected_value}")
+                                    
                             elif isinstance(column.params.values, dict):
                                 # Subcategory sampler - depends on category column
                                 category_name = getattr(column.params, "category", None)
+                                logger.debug(f"Processing subcategory column {column_name}: category={category_name}")
+                                logger.debug(f"  Record so far: {record}")
+                                logger.debug(f"  Subcategory values: {column.params.values}")
+                                
                                 if category_name and category_name in record:
                                     category_value = record[category_name]
                                     subcategories = column.params.values.get(category_value, [])
+                                    logger.debug(f"  Category value: {category_value}")
+                                    logger.debug(f"  Available subcategories: {subcategories}")
+                                    
                                     if subcategories:
-                                        record[column_name] = random.choice(subcategories)
+                                        selected_subcategory = random.choice(subcategories)
+                                        record[column_name] = selected_subcategory
+                                        logger.debug(f"  Selected subcategory: {selected_subcategory}")
                                     else:
                                         record[column_name] = f"[No subcategories for {category_value}]"
+                                        logger.warning(f"No subcategories found for category {category_value}")
                                 else:
                                     record[column_name] = f"[Missing category dependency: {category_name}]"
+                                    logger.warning(f"Missing category dependency for {column_name}: {category_name}")
                             else:
                                 record[column_name] = str(column.params.values)
 
                     elif isinstance(column, (LLMTextColumn, LLMGenColumn)):
                         # LLM column - execute locally
+                        logger.debug(f"Processing LLM column {column_name}")
+                        logger.debug(f"  Record before LLM execution: {record}")
+                        
                         model_config = self._get_model_config_for_column(column)
                         if model_config and model_config.connection_id:
                             try:
@@ -353,6 +424,7 @@ def patch_data_designer():
                                     column, record, model_config
                                 )
                                 record[column_name] = result
+                                logger.debug(f"  LLM result for {column_name}: {result[:100]}...")
                             except Exception as e:
                                 logger.error(
                                     f"❌ Failed to execute LLM column {column_name}: {e}"
@@ -432,34 +504,53 @@ def patch_data_designer():
             return error_results
 
     def _get_sorted_columns(self) -> List[str]:
-        """Get columns sorted by dependencies."""
-        # Separate column types and handle dependencies
-        category_columns = []
-        subcategory_columns = []
-        llm_columns = []
-        other_columns = []
-
+        """Get columns sorted by dependencies using topological sort."""
+        # Build dependency graph
+        dependencies = {}
+        all_columns = set(self._columns.keys())
+        
         for column_name, column in self._columns.items():
-            if hasattr(column, "params"):
-                if hasattr(column.params, "values"):
-                    if isinstance(column.params.values, list):
-                        # Category sampler - no dependencies
-                        category_columns.append(column_name)
-                    elif isinstance(column.params.values, dict):
-                        # Subcategory sampler - depends on category
-                        subcategory_columns.append(column_name)
+            dependencies[column_name] = set()
+            
+            # Check for subcategory dependencies
+            if hasattr(column, "params") and hasattr(column.params, "category"):
+                category_name = column.params.category
+                if category_name in all_columns:
+                    dependencies[column_name].add(category_name)
+            
+            # Check for LLM column template dependencies
+            if hasattr(column, "prompt"):
+                import re
+                # Find all template variables like {{ variable_name }} (with optional spaces)
+                template_vars = re.findall(r"\{\{\s*(\w+)\s*\}\}", column.prompt)
+                logger.debug(f"Template vars found in {column_name}: {template_vars}")
+                for var in template_vars:
+                    if var in all_columns:
+                        dependencies[column_name].add(var)
+                        logger.debug(f"  Added dependency: {column_name} -> {var}")
                     else:
-                        other_columns.append(column_name)
-                else:
-                    other_columns.append(column_name)
-            elif hasattr(column, "model_alias"):
-                # LLM columns - should come after samplers
-                llm_columns.append(column_name)
-            else:
-                other_columns.append(column_name)
-
-        # Return in dependency order: categories first, then subcategories, then LLM, then others
-        return category_columns + subcategory_columns + llm_columns + other_columns
+                        logger.debug(f"  Template var {var} not found in columns: {all_columns}")
+        
+        # Topological sort
+        sorted_columns = []
+        remaining = set(all_columns)
+        
+        while remaining:
+            # Find columns with no unresolved dependencies
+            ready = [col for col in remaining if not (dependencies[col] & remaining)]
+            
+            if not ready:
+                # Circular dependency or missing dependency - add remaining in original order
+                logger.warning(f"Circular or missing dependencies detected for columns: {remaining}")
+                ready = list(remaining)
+            
+            # Add ready columns to result
+            for col in ready:
+                sorted_columns.append(col)
+                remaining.remove(col)
+        
+        logger.debug(f"Column execution order: {sorted_columns}")
+        return sorted_columns
 
     def _get_model_config_for_column(self, column) -> Optional[ModelConfig]:
         """Get the model config for a specific column."""
