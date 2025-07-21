@@ -709,3 +709,5 @@ def apply_patch():
 
 if __name__ == "__main__":
     apply_patch()
+
+# patch for gretel-client
