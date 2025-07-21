@@ -15,6 +15,15 @@ from gretel_client.data_designer.preview import PreviewResults
 from gretel_client.data_designer.types import LLMTextColumn, LLMGenColumn
 from gretel_client.workflows.configs.workflows import ModelConfig
 
+# Import local evaluation system
+try:
+    from local_evaluation import LocalEvaluationEngine, LocalEvaluationSettings, create_evaluation_report
+except ImportError:
+    logger.warning("Local evaluation system not available - evaluation features disabled")
+    LocalEvaluationEngine = None
+    LocalEvaluationSettings = None
+    create_evaluation_report = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -643,6 +652,56 @@ def patch_data_designer():
             logger.warning(
                 "No debug information available (debug_storage was not enabled or no preview was run)"
             )
+    
+    def with_evaluation_report(self, settings=None):
+        """Local implementation of with_evaluation_report for custom connections."""
+        if self._has_custom_connections() and LocalEvaluationSettings is not None:
+            # Configure local evaluation pipeline
+            logger.info("🔄 Configuring local evaluation report")
+            self._local_evaluation_settings = LocalEvaluationSettings(settings)
+            self._evaluation_report_enabled = True
+            return self
+        else:
+            # Use original Gretel implementation for non-custom connections
+            logger.info("🚀 Using Gretel evaluation report")
+            # Call the original method if it exists
+            if hasattr(super(DataDesigner, self), 'with_evaluation_report'):
+                return super(DataDesigner, self).with_evaluation_report(settings)
+            else:
+                logger.warning("Original with_evaluation_report method not available")
+                return self
+    
+    def generate_local_evaluation_report(self, df: pd.DataFrame, output_path: Optional[str] = None) -> str:
+        """Generate a local evaluation report for the dataset."""
+        if not hasattr(self, '_evaluation_report_enabled') or not self._evaluation_report_enabled:
+            logger.warning("Evaluation report not enabled. Call with_evaluation_report() first.")
+            return ""
+        
+        if create_evaluation_report is None:
+            logger.error("Local evaluation system not available")
+            return ""
+        
+        logger.info("📊 Generating local evaluation report...")
+        
+        # Get AIDD metadata if available
+        aidd_metadata = None
+        try:
+            from gretel_client.data_designer.viz_tools import AIDDMetadata
+            aidd_metadata = AIDDMetadata.from_aidd(self)
+        except Exception as e:
+            logger.warning(f"Could not get AIDD metadata: {e}")
+        
+        # Generate the report
+        evaluation_settings = getattr(self, '_local_evaluation_settings', None)
+        html_content = create_evaluation_report(
+            df=df,
+            aidd_metadata=aidd_metadata,
+            settings=evaluation_settings,
+            output_path=output_path
+        )
+        
+        logger.info("✅ Local evaluation report generated successfully")
+        return html_content
 
     def get_debug_summary(self) -> Dict[str, Any]:
         """Get debug summary from the last preview call."""
@@ -694,6 +753,8 @@ def patch_data_designer():
     DataDesigner._get_model_config_for_column = _get_model_config_for_column
     DataDesigner.save_debug_info = save_debug_info
     DataDesigner.get_debug_summary = get_debug_summary
+    DataDesigner.with_evaluation_report = with_evaluation_report
+    DataDesigner.generate_local_evaluation_report = generate_local_evaluation_report
     DataDesigner.preview = patched_preview
 
     logger.info("✅ DataDesigner bypass patch applied successfully!")
