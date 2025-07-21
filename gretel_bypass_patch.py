@@ -21,13 +21,18 @@ logger = logging.getLogger(__name__)
 class LocalLLMExecutor:
     """Handles local execution of LLM tasks for custom model connections."""
 
-    def __init__(self, connection_configs: Dict[str, Dict[str, Any]], debug_storage: bool = False, debug_file: Optional[str] = None):
+    def __init__(
+        self,
+        connection_configs: Dict[str, Dict[str, Any]],
+        debug_storage: bool = False,
+        debug_file: Optional[str] = None,
+    ):
         self.connection_configs = connection_configs
         self.debug_storage = debug_storage
         self.debug_file = debug_file
         self.debug_calls = [] if debug_storage else None
         self.debug_call_count = 0
-        
+
         # Initialize debug file if streaming is enabled
         if debug_storage and debug_file:
             self._initialize_debug_file()
@@ -70,30 +75,34 @@ class LocalLLMExecutor:
         """Substitute template variables in the prompt with actual values using Jinja2."""
         try:
             from jinja2 import Template
-            
+
             # Debug: Log what we're working with
             logger.debug(f"Template substitution input:")
             logger.debug(f"  Prompt: {prompt[:200]}...")
             logger.debug(f"  Context data: {context_data}")
             logger.debug(f"  Context data keys: {list(context_data.keys())}")
-            
+
             # Create Jinja2 template
             template = Template(prompt)
-            
+
             # Render template with context data
             rendered = template.render(context_data)
-            
+
             logger.debug(f"Template rendered: {rendered[:200]}...")
-            
+
             # Check if substitution actually worked
             if "{{" in rendered:
-                logger.warning(f"Template variables not substituted! Rendered: {rendered[:300]}...")
-            
+                logger.warning(
+                    f"Template variables not substituted! Rendered: {rendered[:300]}..."
+                )
+
             return rendered
-            
+
         except ImportError:
             # Fallback to simple regex replacement if Jinja2 is not available
-            logger.warning("Jinja2 not available, using simple template variable replacement")
+            logger.warning(
+                "Jinja2 not available, using simple template variable replacement"
+            )
             import re
 
             # Find all template variables like {{variable_name}}
@@ -185,45 +194,49 @@ class LocalLLMExecutor:
                 raise ValueError("Empty response from local LLM")
 
             logger.info(f"✅ Local LLM response: {content[:100]}...")
-            
+
             # Store debug information if enabled
             if self.debug_storage and debug_info:
-                debug_info.update({
-                    "success": True,
-                    "response": result,
-                    "response_content": content,
-                    "response_length": len(content),
-                })
-                
+                debug_info.update(
+                    {
+                        "success": True,
+                        "response": result,
+                        "response_content": content,
+                        "response_length": len(content),
+                    }
+                )
+
                 # Append to memory if not streaming to file
                 if self.debug_calls is not None:
                     self.debug_calls.append(debug_info)
-                
+
                 # Append to file in real-time if streaming enabled
                 if self.debug_file:
                     self._append_debug_call(debug_info)
-            
+
             return content
 
         except requests.exceptions.RequestException as e:
             logger.error(f"❌ Local LLM call failed: {e}")
-            
+
             # Store debug information if enabled
             if self.debug_storage and debug_info:
-                debug_info.update({
-                    "success": False,
-                    "error": str(e),
-                    "error_type": type(e).__name__,
-                })
-                
+                debug_info.update(
+                    {
+                        "success": False,
+                        "error": str(e),
+                        "error_type": type(e).__name__,
+                    }
+                )
+
                 # Append to memory if not streaming to file
                 if self.debug_calls is not None:
                     self.debug_calls.append(debug_info)
-                
+
                 # Append to file in real-time if streaming enabled
                 if self.debug_file:
                     self._append_debug_call(debug_info)
-            
+
             raise
 
     def _initialize_debug_file(self):
@@ -239,18 +252,20 @@ class LocalLLMExecutor:
         """Append a single debug call to the file in real-time."""
         if not self.debug_file:
             return
-            
+
         try:
             # Add comma if not the first entry
             prefix = ",\n" if self.debug_call_count > 0 else ""
-            
+
             with open(self.debug_file, "a") as f:
                 f.write(f"{prefix}  {json.dumps(debug_info, indent=2, default=str)}")
                 f.flush()  # Ensure immediate write
-                
+
             self.debug_call_count += 1
-            logger.debug(f"📝 Appended debug call #{self.debug_call_count} to {self.debug_file}")
-            
+            logger.debug(
+                f"📝 Appended debug call #{self.debug_call_count} to {self.debug_file}"
+            )
+
         except Exception as e:
             logger.error(f"❌ Failed to append debug call to {self.debug_file}: {e}")
 
@@ -258,38 +273,47 @@ class LocalLLMExecutor:
         """Close the JSON array in the debug file."""
         if not self.debug_file:
             return
-            
+
         try:
             with open(self.debug_file, "a") as f:
                 f.write("\n]")
-            logger.info(f"✅ Finalized debug file: {self.debug_file} ({self.debug_call_count} calls)")
+            logger.info(
+                f"✅ Finalized debug file: {self.debug_file} ({self.debug_call_count} calls)"
+            )
         except Exception as e:
             logger.error(f"❌ Failed to finalize debug file {self.debug_file}: {e}")
 
     def save_debug_calls(self, filename: str = "llm_debug_calls.json"):
         """Save debug calls to a JSON file."""
         if not self.debug_storage or not self.debug_calls:
-            logger.warning("No debug calls to save (debug_storage disabled or no calls made)")
+            logger.warning(
+                "No debug calls to save (debug_storage disabled or no calls made)"
+            )
             return
-        
+
         with open(filename, "w") as f:
             json.dump(self.debug_calls, f, indent=2, default=str)
-        
+
         logger.info(f"💾 Saved {len(self.debug_calls)} debug calls to {filename}")
 
     def get_debug_summary(self) -> Dict[str, Any]:
         """Get a summary of debug calls."""
         if not self.debug_storage or not self.debug_calls:
             return {"total_calls": 0, "successful_calls": 0, "failed_calls": 0}
-        
+
         successful = sum(1 for call in self.debug_calls if call.get("success", False))
         failed = len(self.debug_calls) - successful
-        
+
         return {
             "total_calls": len(self.debug_calls),
             "successful_calls": successful,
             "failed_calls": failed,
-            "average_response_length": sum(call.get("response_length", 0) for call in self.debug_calls if call.get("success", False)) / max(successful, 1),
+            "average_response_length": sum(
+                call.get("response_length", 0)
+                for call in self.debug_calls
+                if call.get("success", False)
+            )
+            / max(successful, 1),
             "calls": self.debug_calls,
         }
 
@@ -326,19 +350,26 @@ def patch_data_designer():
 
         return connection_configs
 
-    def _execute_local_preview(self, verbose_logging: bool = False, debug_storage: bool = False, debug_file: Optional[str] = None) -> PreviewResults:
+    def _execute_local_preview(
+        self,
+        verbose_logging: bool = False,
+        debug_storage: bool = False,
+        debug_file: Optional[str] = None,
+        num_records: int = 10,
+    ) -> PreviewResults:
         """Execute preview locally without going through Gretel servers."""
         logger.info("🚀 Executing local preview (bypassing Gretel servers)")
 
         # Get connection configurations
         connection_configs = self._get_connection_configs()
-        executor = LocalLLMExecutor(connection_configs, debug_storage=debug_storage, debug_file=debug_file)
-        
+        executor = LocalLLMExecutor(
+            connection_configs, debug_storage=debug_storage, debug_file=debug_file
+        )
+
         # Store executor for later access to debug info
         self._last_executor = executor
 
         # Generate sample data
-        num_records = 10  # Preview records
         records = []
 
         try:
@@ -350,65 +381,97 @@ def patch_data_designer():
 
                 for column_name in sorted_columns:
                     column = self.get_column(column_name)
-                    
-                    logger.debug(f"Processing column {column_name}: {type(column).__name__}")
+
+                    logger.debug(
+                        f"Processing column {column_name}: {type(column).__name__}"
+                    )
 
                     if hasattr(column, "params"):
                         # Handle different sampler types
                         import random
                         import numpy as np
-                        
+
                         if hasattr(column.params, "values"):
                             if isinstance(column.params.values, list):
                                 # Category sampler - handle weighted sampling
                                 values = column.params.values
                                 weights = getattr(column.params, "weights", None)
-                                
+
                                 if weights and len(weights) == len(values):
                                     # Weighted sampling
                                     try:
                                         # Normalize weights
                                         weights = np.array(weights, dtype=float)
                                         weights = weights / weights.sum()
-                                        
+
                                         # Sample based on weights
-                                        selected_value = np.random.choice(values, p=weights)
+                                        selected_value = np.random.choice(
+                                            values, p=weights
+                                        )
                                         record[column_name] = selected_value
-                                        logger.debug(f"  Weighted sampled {column_name}: {selected_value}")
+                                        logger.debug(
+                                            f"  Weighted sampled {column_name}: {selected_value}"
+                                        )
                                     except Exception as e:
-                                        logger.warning(f"Weighted sampling failed for {column_name}: {e}, using uniform sampling")
+                                        logger.warning(
+                                            f"Weighted sampling failed for {column_name}: {e}, using uniform sampling"
+                                        )
                                         selected_value = random.choice(values)
                                         record[column_name] = selected_value
-                                        logger.debug(f"  Fallback sampled {column_name}: {selected_value}")
+                                        logger.debug(
+                                            f"  Fallback sampled {column_name}: {selected_value}"
+                                        )
                                 else:
                                     # Uniform sampling
                                     selected_value = random.choice(values)
                                     record[column_name] = selected_value
-                                    logger.debug(f"  Uniform sampled {column_name}: {selected_value}")
-                                    
+                                    logger.debug(
+                                        f"  Uniform sampled {column_name}: {selected_value}"
+                                    )
+
                             elif isinstance(column.params.values, dict):
                                 # Subcategory sampler - depends on category column
                                 category_name = getattr(column.params, "category", None)
-                                logger.debug(f"Processing subcategory column {column_name}: category={category_name}")
+                                logger.debug(
+                                    f"Processing subcategory column {column_name}: category={category_name}"
+                                )
                                 logger.debug(f"  Record so far: {record}")
-                                logger.debug(f"  Subcategory values: {column.params.values}")
-                                
+                                logger.debug(
+                                    f"  Subcategory values: {column.params.values}"
+                                )
+
                                 if category_name and category_name in record:
                                     category_value = record[category_name]
-                                    subcategories = column.params.values.get(category_value, [])
+                                    subcategories = column.params.values.get(
+                                        category_value, []
+                                    )
                                     logger.debug(f"  Category value: {category_value}")
-                                    logger.debug(f"  Available subcategories: {subcategories}")
-                                    
+                                    logger.debug(
+                                        f"  Available subcategories: {subcategories}"
+                                    )
+
                                     if subcategories:
-                                        selected_subcategory = random.choice(subcategories)
+                                        selected_subcategory = random.choice(
+                                            subcategories
+                                        )
                                         record[column_name] = selected_subcategory
-                                        logger.debug(f"  Selected subcategory: {selected_subcategory}")
+                                        logger.debug(
+                                            f"  Selected subcategory: {selected_subcategory}"
+                                        )
                                     else:
-                                        record[column_name] = f"[No subcategories for {category_value}]"
-                                        logger.warning(f"No subcategories found for category {category_value}")
+                                        record[column_name] = (
+                                            f"[No subcategories for {category_value}]"
+                                        )
+                                        logger.warning(
+                                            f"No subcategories found for category {category_value}"
+                                        )
                                 else:
-                                    record[column_name] = f"[Missing category dependency: {category_name}]"
-                                    logger.warning(f"Missing category dependency for {column_name}: {category_name}")
+                                    record[column_name] = (
+                                        f"[Missing category dependency: {category_name}]"
+                                    )
+                                    logger.warning(
+                                        f"Missing category dependency for {column_name}: {category_name}"
+                                    )
                             else:
                                 record[column_name] = str(column.params.values)
 
@@ -416,7 +479,7 @@ def patch_data_designer():
                         # LLM column - execute locally
                         logger.debug(f"Processing LLM column {column_name}")
                         logger.debug(f"  Record before LLM execution: {record}")
-                        
+
                         model_config = self._get_model_config_for_column(column)
                         if model_config and model_config.connection_id:
                             try:
@@ -424,7 +487,9 @@ def patch_data_designer():
                                     column, record, model_config
                                 )
                                 record[column_name] = result
-                                logger.debug(f"  LLM result for {column_name}: {result[:100]}...")
+                                logger.debug(
+                                    f"  LLM result for {column_name}: {result[:100]}..."
+                                )
                             except Exception as e:
                                 logger.error(
                                     f"❌ Failed to execute LLM column {column_name}: {e}"
@@ -448,12 +513,8 @@ def patch_data_designer():
             # Create PreviewResults - use correct import path
             from gretel_client.data_designer.viz_tools import AIDDMetadata
 
-            # Create minimal AIDDMetadata for preview
-            aidd_metadata = AIDDMetadata(
-                columns=list(df.columns),
-                num_records=len(df),
-                project_id="local-preview",
-            )
+            # Create AIDDMetadata properly using the from_aidd class method
+            aidd_metadata = AIDDMetadata.from_aidd(self)
 
             preview_results = PreviewResults(
                 aidd_metadata=aidd_metadata,
@@ -463,16 +524,18 @@ def patch_data_designer():
             )
 
             logger.info("🎉 Local preview completed successfully!")
-            
+
             # Finalize debug file if streaming
             if debug_file and executor.debug_file:
                 executor._finalize_debug_file()
-            
+
             # Add debug info to results if enabled
             if debug_storage and executor.debug_storage:
                 preview_results.debug_info = executor.get_debug_summary()
-                logger.info(f"🔍 Debug info: {preview_results.debug_info['total_calls']} LLM calls captured")
-            
+                logger.info(
+                    f"🔍 Debug info: {preview_results.debug_info['total_calls']} LLM calls captured"
+                )
+
             return preview_results
 
         except Exception as e:
@@ -480,10 +543,8 @@ def patch_data_designer():
             # Return empty results on failure
             from gretel_client.data_designer.viz_tools import AIDDMetadata
 
-            # Create minimal AIDDMetadata for error case
-            aidd_metadata = AIDDMetadata(
-                columns=[], num_records=0, project_id="local-preview-error"
-            )
+            # Create AIDDMetadata for error case using the from_aidd class method
+            aidd_metadata = AIDDMetadata.from_aidd(self)
 
             error_results = PreviewResults(
                 aidd_metadata=aidd_metadata,
@@ -491,16 +552,18 @@ def patch_data_designer():
                 success=False,
                 evaluation_results={"error": f"Local execution failed: {str(e)}"},
             )
-            
+
             # Finalize debug file if streaming (even on error)
             if debug_file and executor.debug_file:
                 executor._finalize_debug_file()
-            
+
             # Add debug info to error results if enabled
             if debug_storage and executor.debug_storage:
                 error_results.debug_info = executor.get_debug_summary()
-                logger.info(f"🔍 Debug info: {error_results.debug_info['total_calls']} LLM calls captured (with errors)")
-            
+                logger.info(
+                    f"🔍 Debug info: {error_results.debug_info['total_calls']} LLM calls captured (with errors)"
+                )
+
             return error_results
 
     def _get_sorted_columns(self) -> List[str]:
@@ -508,19 +571,20 @@ def patch_data_designer():
         # Build dependency graph
         dependencies = {}
         all_columns = set(self._columns.keys())
-        
+
         for column_name, column in self._columns.items():
             dependencies[column_name] = set()
-            
+
             # Check for subcategory dependencies
             if hasattr(column, "params") and hasattr(column.params, "category"):
                 category_name = column.params.category
                 if category_name in all_columns:
                     dependencies[column_name].add(category_name)
-            
+
             # Check for LLM column template dependencies
             if hasattr(column, "prompt"):
                 import re
+
                 # Find all template variables like {{ variable_name }} (with optional spaces)
                 template_vars = re.findall(r"\{\{\s*(\w+)\s*\}\}", column.prompt)
                 logger.debug(f"Template vars found in {column_name}: {template_vars}")
@@ -529,26 +593,30 @@ def patch_data_designer():
                         dependencies[column_name].add(var)
                         logger.debug(f"  Added dependency: {column_name} -> {var}")
                     else:
-                        logger.debug(f"  Template var {var} not found in columns: {all_columns}")
-        
+                        logger.debug(
+                            f"  Template var {var} not found in columns: {all_columns}"
+                        )
+
         # Topological sort
         sorted_columns = []
         remaining = set(all_columns)
-        
+
         while remaining:
             # Find columns with no unresolved dependencies
             ready = [col for col in remaining if not (dependencies[col] & remaining)]
-            
+
             if not ready:
                 # Circular dependency or missing dependency - add remaining in original order
-                logger.warning(f"Circular or missing dependencies detected for columns: {remaining}")
+                logger.warning(
+                    f"Circular or missing dependencies detected for columns: {remaining}"
+                )
                 ready = list(remaining)
-            
+
             # Add ready columns to result
             for col in ready:
                 sorted_columns.append(col)
                 remaining.remove(col)
-        
+
         logger.debug(f"Column execution order: {sorted_columns}")
         return sorted_columns
 
@@ -565,20 +633,35 @@ def patch_data_designer():
 
     def save_debug_info(self, filename: str = "llm_debug_calls.json"):
         """Save debug information from the last preview call."""
-        if hasattr(self, '_last_executor') and self._last_executor and self._last_executor.debug_storage:
+        if (
+            hasattr(self, "_last_executor")
+            and self._last_executor
+            and self._last_executor.debug_storage
+        ):
             self._last_executor.save_debug_calls(filename)
         else:
-            logger.warning("No debug information available (debug_storage was not enabled or no preview was run)")
+            logger.warning(
+                "No debug information available (debug_storage was not enabled or no preview was run)"
+            )
 
     def get_debug_summary(self) -> Dict[str, Any]:
         """Get debug summary from the last preview call."""
-        if hasattr(self, '_last_executor') and self._last_executor and self._last_executor.debug_storage:
+        if (
+            hasattr(self, "_last_executor")
+            and self._last_executor
+            and self._last_executor.debug_storage
+        ):
             return self._last_executor.get_debug_summary()
         else:
             return {"total_calls": 0, "successful_calls": 0, "failed_calls": 0}
 
     def patched_preview(
-        self, verbose_logging: bool = False, validate: bool = True, debug_storage: bool = False, debug_file: Optional[str] = None
+        self,
+        verbose_logging: bool = False,
+        validate: bool = True,
+        debug_storage: bool = False,
+        debug_file: Optional[str] = None,
+        num_records: int = 10,
     ) -> PreviewResults:
         """Patched preview method that bypasses Gretel servers for custom connections."""
         if validate:
@@ -587,7 +670,12 @@ def patch_data_designer():
         # Check if this configuration uses custom model connections
         if self._has_custom_connections():
             logger.info("🔄 Detected custom model connections - executing locally")
-            return self._execute_local_preview(verbose_logging=verbose_logging, debug_storage=debug_storage, debug_file=debug_file)
+            return self._execute_local_preview(
+                verbose_logging=verbose_logging,
+                debug_storage=debug_storage,
+                debug_file=debug_file,
+                num_records=num_records,
+            )
         else:
             # Use original implementation for non-custom connections
             logger.info("🚀 Generating preview (using Gretel servers)")
